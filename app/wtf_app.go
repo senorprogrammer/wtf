@@ -1,19 +1,22 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"time"
 
 	"github.com/gdamore/tcell"
+
+	// Bring in the extended set of terminfo definitions
 	_ "github.com/gdamore/tcell/terminfo/extended"
+
 	"github.com/logrusorgru/aurora"
 	"github.com/olebedev/config"
 	"github.com/radovskyb/watcher"
 	"github.com/rivo/tview"
 	"github.com/wtfutil/wtf/cfg"
-	"github.com/wtfutil/wtf/support"
 	"github.com/wtfutil/wtf/utils"
 	"github.com/wtfutil/wtf/wtf"
 )
@@ -27,15 +30,14 @@ type WtfApp struct {
 	configFilePath string
 	display        *Display
 	focusTracker   FocusTracker
-	ghUser         *support.GitHubUser
 	pages          *tview.Pages
 	validator      *ModuleValidator
 	widgets        []wtf.Wtfable
 }
 
 // NewWtfApp creates and returns an instance of WtfApp
-func NewWtfApp(tviewApp *tview.Application, config *config.Config, configFilePath string) *WtfApp {
-	wtfApp := &WtfApp{
+func NewWtfApp(config *config.Config, tviewApp *tview.Application, configFilePath string) WtfApp {
+	wtfApp := WtfApp{
 		TViewApp: tviewApp,
 
 		config:         config,
@@ -43,37 +45,33 @@ func NewWtfApp(tviewApp *tview.Application, config *config.Config, configFilePat
 		pages:          tview.NewPages(),
 	}
 
-	wtfApp.TViewApp.SetBeforeDrawFunc(func(s tcell.Screen) bool {
-		s.Clear()
-		return false
-	})
-
 	wtfApp.widgets = MakeWidgets(wtfApp.TViewApp, wtfApp.pages, wtfApp.config)
 	wtfApp.display = NewDisplay(wtfApp.widgets, wtfApp.config)
 	wtfApp.focusTracker = NewFocusTracker(wtfApp.TViewApp, wtfApp.widgets, wtfApp.config)
 	wtfApp.validator = NewModuleValidator()
 
-	githubAPIKey := readGitHubAPIKey(wtfApp.config)
-	wtfApp.ghUser = support.NewGitHubUser(githubAPIKey)
-
 	wtfApp.pages.AddPage("grid", wtfApp.display.Grid, true, true)
 
 	wtfApp.validator.Validate(wtfApp.widgets)
 
-	firstWidget := wtfApp.widgets[0]
-	wtfApp.pages.Box.SetBackgroundColor(
-		wtf.ColorFor(
-			firstWidget.CommonSettings().Colors.WidgetTheme.Background,
-		),
-	)
+	wtfApp.setBackgroundColor()
 
-	wtfApp.TViewApp.SetInputCapture(wtfApp.keyboardIntercept)
 	wtfApp.TViewApp.SetRoot(wtfApp.pages, true)
 
 	return wtfApp
 }
 
 /* -------------------- Exported Functions -------------------- */
+
+// FirstWidget returns the first wiget in the set of widgets, or
+// an error if there are none
+func (wtfApp *WtfApp) FirstWidget() (wtf.Wtfable, error) {
+	if len(wtfApp.widgets) < 1 {
+		return nil, errors.New("cannot get first widget. no widgets defined")
+	}
+
+	return wtfApp.widgets[0], nil
+}
 
 // Run starts the underlying tview app
 func (wtfApp *WtfApp) Run() {
@@ -87,63 +85,33 @@ func (wtfApp *WtfApp) Run() {
 func (wtfApp *WtfApp) Start() {
 	go wtfApp.scheduleWidgets()
 	go wtfApp.watchForConfigChanges()
-
-	// FIXME: This should be moved to the AppManager
-	go func() { _ = wtfApp.ghUser.Load() }()
 }
 
 // Stop kills all the currently-running widgets in this app
 func (wtfApp *WtfApp) Stop() {
 	wtfApp.stopAllWidgets()
+	wtfApp.TViewApp.Stop()
 }
 
 /* -------------------- Unexported Functions -------------------- */
+
+func (wtfApp *WtfApp) setBackgroundColor() {
+	var bgColor tcell.Color
+
+	firstWidget, err := wtfApp.FirstWidget()
+	if err != nil {
+		bgColor = wtf.ColorFor("black")
+	} else {
+		bgColor = wtf.ColorFor(firstWidget.CommonSettings().Colors.WidgetTheme.Background)
+	}
+
+	wtfApp.pages.Box.SetBackgroundColor(bgColor)
+}
 
 func (wtfApp *WtfApp) stopAllWidgets() {
 	for _, widget := range wtfApp.widgets {
 		widget.Stop()
 	}
-}
-
-func (wtfApp *WtfApp) keyboardIntercept(event *tcell.EventKey) *tcell.EventKey {
-	// These keys are global keys used by the app. Widgets should not implement these keys
-	switch event.Key() {
-	case tcell.KeyCtrlC:
-		wtfApp.Stop()
-		wtfApp.TViewApp.Stop()
-		wtfApp.DisplayExitMessage()
-	case tcell.KeyCtrlR:
-		wtfApp.refreshAllWidgets()
-		return nil
-	case tcell.KeyCtrlSpace:
-		// FIXME: This can't reside in the app, the app doesn't know about
-		// the AppManager. The AppManager needs to catch this one
-		fmt.Println("Next app")
-		return nil
-	case tcell.KeyTab:
-		wtfApp.focusTracker.Next()
-	case tcell.KeyBacktab:
-		wtfApp.focusTracker.Prev()
-		return nil
-	case tcell.KeyEsc:
-		wtfApp.focusTracker.None()
-	}
-
-	// Checks to see if any widget has been assigned the pressed key as its focus key
-	if wtfApp.focusTracker.FocusOn(string(event.Rune())) {
-		return nil
-	}
-
-	// If no specific widget has focus, then allow the key presses to fall through to the app
-	if !wtfApp.focusTracker.IsFocused {
-		switch string(event.Rune()) {
-		case "/":
-			return nil
-		default:
-		}
-	}
-
-	return event
 }
 
 func (wtfApp *WtfApp) refreshAllWidgets() {
@@ -171,7 +139,7 @@ func (wtfApp *WtfApp) watchForConfigChanges() {
 				wtfApp.Stop()
 
 				config := cfg.LoadWtfConfigFile(wtfApp.configFilePath)
-				newApp := NewWtfApp(wtfApp.TViewApp, config, wtfApp.configFilePath)
+				newApp := NewWtfApp(config, wtfApp.TViewApp, wtfApp.configFilePath)
 				openURLUtil := utils.ToStrs(config.UList("wtf.openUrlUtil", []interface{}{}))
 				utils.Init(config.UString("wtf.openFileUtil", "open"), openURLUtil)
 

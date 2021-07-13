@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/olebedev/config"
+	"github.com/rivo/tview"
 	"github.com/wtfutil/wtf/support"
 	"gotest.tools/assert"
 )
@@ -51,13 +53,13 @@ func Test_displayExitMessage(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			wtfApp := WtfApp{}
-			wtfApp.ghUser = &support.GitHubUser{
+			appMan := NewAppManager(&config.Config{}, tview.NewApplication())
+			appMan.ghUser = &support.GitHubUser{
 				IsContributor: tt.isContributor,
 				IsSponsor:     tt.isSponsor,
 			}
 
-			actual := wtfApp.displayExitMsg(tt.isDisplayable)
+			actual := appMan.displayExitMsg(tt.isDisplayable)
 
 			if tt.compareWith == "equals" {
 				assert.Equal(t, actual, tt.expected)
